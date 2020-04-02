@@ -1,4 +1,6 @@
 import os, sys, time, lcd, smbus, random
+import RPi.GPIO as GPIO
+from subprocess import call
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame.transform
@@ -14,18 +16,40 @@ pygame.mixer.init()
 
 i2cbus = smbus.SMBus(1)
 
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(26, GPIO.IN)
+
 def findFiles(dir):
     return list(map(lambda x: dir + x, os.listdir(dir)))
+
+def sendI2C(address, contents):
+    i2cbus.write_byte(address, 6)
+    time.sleep(0.0005)
+    i2cbus.write_byte(address, 133)
+    time.sleep(0.0005)
+    i2cbus.write_byte(address, len(contents))
+    time.sleep(0.0005)
+
+    checksum = len(contents)
+    for c in contents:
+        checksum = checksum ^ c
+        i2cbus.write_byte(address, c)
+        time.sleep(0.0005)
+
+    i2cbus.write_byte(address, checksum)
+    time.sleep(0.0005)
 
 if __name__ == '__main__':
     driveJoystick = None
     lastDriveJoystickMovement = 0
+    lastDriveCommand = 0
     domeJoystick = None
     lastDomeJoystickMovement = 0
     lastJoystickInit = time.time()
     lcdScreen = lcd.LCD()
     lcdScreen.init()
     lastDomeDirection = 0
+    lastDomeSpeed = 0
     lastDomeUpdate = 0
 
     genericAudioFiles = findFiles('/home/pi/audio/generic/')
@@ -49,10 +73,44 @@ if __name__ == '__main__':
         pygame.mixer.music.load(audiofile)
         pygame.mixer.music.play()
 
+    def updateMovementSpeed(x, y):
+        x_valid = (x < 0.05) or (x > 0.05)
+        y_valid = (y < 0.05) or (y > 0.05)
+
+        if x_valid and y_valid:
+            x = int(x * 127)
+            y = int(y * -127)
+        else:
+            x = 0
+            y = 0
+        
+        cs = 2 ^ x ^ y
+
+        try:
+            i2cbus.write_byte(9, 6)
+            time.sleep(0.0005)
+            i2cbus.write_byte(9, 133)
+            time.sleep(0.0005)
+            i2cbus.write_byte(9, 2)
+            time.sleep(0.0005)
+            i2cbus.write_byte(9, int(x))
+            time.sleep(0.0005)
+            i2cbus.write_byte(9, int(y))
+            time.sleep(0.0005)
+            i2cbus.write_byte(9, int(cs))
+            time.sleep(0.0005)
+        except:
+            print("Drive I2C error")
+
     def updateDomeSpeed(value):
         global lastDomeUpdate
         global lastDomeDirection
+        global lastDomeSpeed
 
+        if ((time.time() - lastDomeUpdate) < 0.2) and (value == lastDomeSpeed):
+            return
+
+        lastDomeSpeed = value
         lastDomeUpdate = time.time()
         if driveJoystick:
             if value < 0.05 :
@@ -65,9 +123,7 @@ if __name__ == '__main__':
                 speed = 0
 
             try:
-                i2cbus.write_byte(8, 1)
-                i2cbus.write_byte(8, lastDomeDirection)
-                i2cbus.write_byte(8, int(speed))
+                sendI2C(8, [ 1, lastDomeDirection, int(speed) ])
             except:
                 print("Dome I2C error")
 
@@ -114,10 +170,13 @@ if __name__ == '__main__':
                 if event.type == pygame.JOYAXISMOTION:
                     if event.joy == 0:
                         lastDriveJoystickMovement = currentTime
-                        if event.axis == 0:
-                            updateDomeSpeed(event.value)
+                        if event.axis == 0 or event.axis == 1:
+                            lastDriveCommand = time.time()
+                            updateMovementSpeed(driveJoystick.get_axis(0), driveJoystick.get_axis(1))
                     if event.joy == 1:
                         lastDomeJoystickMovement = currentTime
+                        if event.axis == 0:
+                            updateDomeSpeed(event.value)
 
                 #if not event.type == pygame.JOYAXISMOTION:
                 #    print event
@@ -159,13 +218,24 @@ if __name__ == '__main__':
                     if event.button == 1:
                         playOneAudio([], screamAudioFiles)
 
-            if driveJoystick and (time.time() - lastDomeUpdate) > 0.5:
-                updateDomeSpeed(driveJoystick.get_axis(0))
+            if domeJoystick and (time.time() - lastDomeUpdate) > 0.5:
+                updateDomeSpeed(domeJoystick.get_axis(0))
 
+            if driveJoystick and (time.time() - lastDriveCommand) > 1:
+                lastDriveCommand = time.time()
+                updateMovementSpeed(driveJoystick.get_axis(0), driveJoystick.get_axis(1))
+
+            if not GPIO.input(26):
+                print("Need to shutdown")
+                lcdScreen.clear()
+                lcdScreen.display("Shutdown")
+                call("sudo shutdown --poweroff now", shell=True)
+                exit()
 
     except KeyboardInterrupt:
         pass
 
     finally:
+        GPIO.cleanup()
         lcdScreen.clear()
         lcdScreen.display("Program discontinued")

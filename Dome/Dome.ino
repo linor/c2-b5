@@ -24,8 +24,10 @@
  */
 #include <Wire.h>
 #include "BTS7960.h"
+#include "ETI2C.h"
 
 #define I2C_ADDRESS       8
+#define I2C_MAX_COMMAND_DURATION 50
 
 #define HALL_SENSOR_0     A0
 #define HALL_SENSOR_90    A1
@@ -46,7 +48,7 @@
 #define MOTOR_L_ENABLE    8
 #define MOTOR_R_ENABLE    11
 
-#define MAX_ROTATION_TIME 20000
+#define MAX_ROTATION_TIME 2000
 
 #define RAMP_UP_SPEED     2
 #define RAMP_DOWN_SPEED   3
@@ -57,9 +59,12 @@ byte *actionPtr = action;
 long lastCommandTime = 0;
 byte currentCommand = 0;
 
+ETI2C eti2c;
+
 void setup() {
-  Wire.begin(I2C_ADDRESS);                
-  Wire.onReceive(receiveEvent); 
+  Wire.begin(I2C_ADDRESS);    
+  Wire.onReceive(receiveEvent);
+  eti2c.begin((uint8_t *)action, sizeof(action), &Wire);            
 
   Serial.begin(9600);
   Serial.println("Dome Controller");
@@ -70,37 +75,35 @@ void setup() {
 }
 
 void update_action() {
-  int used = actionPtr - action;
+  switch(action[0]) {
+    case 1:
+      currentCommand = 1;
+      unsigned int speed = map(action[2], 0, 100, 0, 255);
 
-  if (used > 1) {
-    switch(action[0]) {
-      case 1:
-        if (used < 3) return;
+      if (action[1] == 0) {
+        set_motor_speed(BTS7960::Left, speed, 1);
+      } else {
+        set_motor_speed(BTS7960::Right, speed, 1);
+      }
+      break; 
+  }
 
-        currentCommand = 1;
-        unsigned int speed = map(action[2], 0, 100, 0, 255);
-        if (action[1] == 0) {
-          set_motor_speed(BTS7960::Left, speed, 1);
-        } else {
-          set_motor_speed(BTS7960::Right, speed, 1);
-        }
-        break; 
-    }
-
-    lastCommandTime = millis();
-
-    memset(action, 0, sizeof(action));
-    actionPtr = action;
-  }  
+  lastCommandTime = millis();
+  memset(action, 0, sizeof(action));
 }
 
 void loop() {
+  long current = millis();
+  
   position_loop();
-  update_action();
   update_motor();
 
+  if (eti2c.receiveData()) {
+    update_action();
+  }
+  
   if (currentCommand == 1) {
-    if ((millis() - lastCommandTime) > MAX_ROTATION_TIME) {
+    if ((current - lastCommandTime) > MAX_ROTATION_TIME) {
       stop_motors();
       Serial.println("Emergency stop");
       currentCommand = 0;
@@ -109,16 +112,5 @@ void loop() {
 }
 
 void receiveEvent(int howMany) {
-  int used = actionPtr - action;
-  if ((sizeof(action) - used) < howMany) {
-    while(Wire.available()) {
-      Wire.read();
-      Serial.println("Disposing");    
-    }
-    return;
-  }
-  
-  Wire.readBytes(actionPtr, howMany);
-  actionPtr = actionPtr + howMany;
 }
 
